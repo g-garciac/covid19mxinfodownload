@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text.RegularExpressions;
@@ -16,37 +18,42 @@ namespace FunctionCovid
         [FunctionName("FunctionCovid")]
         public static async Task RunAsync([TimerTrigger("0 10 5 * * *")]TimerInfo myTimer, ILogger log)
         {
-            log.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
-            var storage = new StorageUtils("-SAS en frmato URI con acceso de escritura al Blob donde se descargarán los documentos-");
-            var client = new HttpClient();
-            var req = await client.GetAsync("https://www.gob.mx/salud/documentos/coronavirus-covid-19-comunicado-tecnico-diario-238449");
-            if (req.StatusCode == System.Net.HttpStatusCode.OK)
-            {
-                var data = await req.Content.ReadAsStringAsync();
-                var r = new Regex("href\\s*=\\s*(?:\"(?<1>[^\"]*)\"|(?<1>\\S+))", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-                for (var m = r.Match(data); m.Success; m = m.NextMatch())
-                {
-                    var uri = m.Groups[1].Value;
-                    if (uri.EndsWith(".pdf"))
-                    {
-                        var reqUri = req.RequestMessage.RequestUri;
-                        var uripdf = !uri.Contains("http") ? $"{reqUri.Scheme}://{reqUri.Host}{uri}" : "";
-                        var client2 = new HttpClient();
-                        var req2 = await client2.GetAsync(uripdf);
-                        if (req2.StatusCode == System.Net.HttpStatusCode.OK)
-                        {
-                            var pdf = await req2.Content.ReadAsByteArrayAsync();
-                            var fecha = DateTime.UtcNow;
-                            var pdfName = req2.RequestMessage.RequestUri.Segments.Last();
-                            var pdfNameOnly = pdfName.Substring(0, pdfName.IndexOf("_COVID"));
-                            var name = $"history/{fecha.Month:D2}/{fecha.Day:D2}/{pdfNameOnly}.pdf";
-                            var nameLast = $"last/{pdfNameOnly}.pdf";
-                            await storage.InsertBlobAsync(name, pdf, "application/pdf");
-                            await storage.InsertBlobAsync(nameLast, pdf, "application/pdf");
-                        }
-                    }
-                }
-            }
+            log.LogInformation($"Starting {nameof(ProcessComunicadoTecnico)} at: {DateTime.Now}");
+            await ProcessComunicadoTecnico();
+            log.LogInformation($"Starting {nameof(ProcessDatosCsv)} at: {DateTime.Now}");
+            await ProcessDatosCsv();
         }
+
+        private static async Task ProcessComunicadoTecnico()
+        {
+            var uriWebPage = new Uri("https://www.gob.mx/salud/documentos/coronavirus-covid-19-comunicado-tecnico-diario-238449");
+            var html = await WebUtils.DownoadWebPage(uriWebPage);
+            var uris = WebUtils.FindUrisForFilesInWebPage(".pdf", html, uriWebPage);
+            await WebUtils.DownloadAndSaveFiles(uris,
+                fn => $"{fn.Substring(0, fn.IndexOf("_COVID"))}{Path.GetExtension(fn)}",
+                async (data, fileName) => await SaveHistoryAndLast(data, fileName, "", "application/pdf"));
+        }
+
+        private static async Task ProcessDatosCsv()
+        {
+            var uriWebPage = new Uri("https://www.gob.mx/salud/documentos/datos-abiertos-152127");
+            var html = await WebUtils.DownoadWebPage(uriWebPage);
+            var uris = WebUtils.FindUrisForFilesInWebPage(".zip", html, uriWebPage)
+                .Where(u => (new[] { "datos_abiertos_covid19.zip", "diccionario_datos_covid19.zip" }).Contains(u.Segments.Last()));
+            await WebUtils.DownloadAndSaveFiles(uris, null,
+                async (data, fileName) => await SaveHistoryAndLast(data, fileName, "csv/", "application/x-zip-compressed"));
+        }
+
+        private static async Task SaveHistoryAndLast(byte[] data, string fileName, string prefixForBlobName, string contentType)
+        {
+            var fecha = DateTime.UtcNow;
+            var blobName1 = $"{prefixForBlobName}history/{fecha.Month:D2}/{fecha.Day:D2}/{fileName}";
+            var blobName2 = $"{prefixForBlobName}last/{fileName}";
+            var storage = new StorageUtils("-SAS en frmato URI con acceso de escritura al Blob donde se descargarán los documentos-");
+            await storage.InsertBlobAsync(blobName1, data, contentType);
+            await storage.InsertBlobAsync(blobName2, data, contentType);
+        }
+
+
     }
 }
